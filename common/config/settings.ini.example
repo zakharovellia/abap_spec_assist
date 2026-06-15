@@ -1,0 +1,65 @@
+[common]
+tz = Europe/Moscow
+env = dev
+
+[db]
+; dev: sqlite (один файл), prod: postgresql
+; Для prod используйте postgresql+asyncpg://user:pass@host:5432/dbname
+url = sqlite+aiosqlite:///./data/tz_assist.db
+
+[llm]
+; Корпоративный OpenAI-совместимый шлюз
+base_url = http://llm-gateway.internal/v1
+api_key = CHANGE_ME
+; Модели по ролям агентов
+model_small = qwen2.5-7b-instruct
+model_medium = qwen2.5-32b-instruct
+model_strong = qwen2.5-72b-instruct
+temperature_default = 0.2
+timeout_seconds = 120
+
+[embeddings]
+; provider: api | local
+provider = api
+base_url = http://llm-gateway.internal/v1
+api_key = CHANGE_ME
+model = multilingual-e5-large
+dim = 1024
+; локальный fallback (sentence-transformers)
+local_model = intfloat/multilingual-e5-large
+
+[qdrant]
+url = http://localhost:6333
+api_key =
+collection = tz_examples
+
+[mcp]
+; Эндпоинт существующего SAP MCP-сервера (read-only)
+server_url = http://sap-mcp.internal/mcp
+transport = streamable_http
+auth_token = CHANGE_ME
+
+[minio]
+endpoint = localhost:9000
+access_key = minioadmin
+secret_key = minioadmin
+bucket = tz-documents
+secure = false
+
+[rabbit]
+host = localhost
+port = 5672
+user = guest
+password = guest
+index_tasks_queue = tz_index_tasks
+heartbeat = 400
+
+[explorer]
+; Лимиты автономии SAP Explorer по сценариям
+new_max_calls = 15
+new_max_tokens = 30000
+modification_max_calls = 25
+modification_max_tokens = 50000
+
+[critic]
+max_iterations = 2

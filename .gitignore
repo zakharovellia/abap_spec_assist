@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Local config & secrets
+common/config/settings.ini
+
+# Local databases / artifacts
+*.db
+*.sqlite
+*.sqlite3
+data/
+*.docx
+!templates/*.docx
+
+# Node / frontend
+node_modules/
+tz_ui/dist/
+tz_ui/.vite/
+
+# OS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+
+# Misc
+*.log
