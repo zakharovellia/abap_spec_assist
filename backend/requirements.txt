@@ -1,0 +1,13 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.9
+pydantic-settings>=2.5
+python-multipart>=0.0.10
+
+langgraph>=0.6,<0.7
+langchain-core>=0.3,<0.4
+langchain-openai>=0.3,<0.4
+langchain-mcp-adapters>=0.1,<0.2
+
+python-docx>=1.1
+qdrant-client>=1.12

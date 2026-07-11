@@ -1,0 +1,13 @@
+# Папка с примерами реальных ТЗ; фоновое задание бэкенда синхронизирует её
+# с Qdrant. Файлы кладутся через kubectl cp (см. README) или любой ваш синк.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: examples-data
+  namespace: abap-spec-assist
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
