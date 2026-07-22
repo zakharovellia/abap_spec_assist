@@ -3,8 +3,14 @@ uvicorn[standard]>=0.30
 pydantic>=2.9
 pydantic-settings>=2.5
 python-multipart>=0.0.10
+ldap3>=2.9,<3
+PyJWT>=2.9,<3
 
 langgraph>=0.6,<0.7
+langgraph-checkpoint-sqlite>=2.0,<3
+# aiosqlite>=0.22 удалил Connection.is_alive(), от которого зависит
+# langgraph-checkpoint-sqlite 2.0.11 (AsyncSqliteSaver.setup() падает)
+aiosqlite<0.22
 langchain-core>=0.3,<0.4
 langchain-openai>=0.3,<0.4
 langchain-mcp-adapters>=0.1,<0.2

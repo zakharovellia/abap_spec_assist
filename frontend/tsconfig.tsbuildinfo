@@ -1,1 +1,1 @@
-{"root":["./src/app.tsx","./src/chatpanel.tsx","./src/specpreview.tsx","./src/api.ts","./src/icons.tsx","./src/main.tsx"],"version":"5.9.3"}
+{"root":["./src/app.tsx","./src/chatpanel.tsx","./src/loginscreen.tsx","./src/sessionsidebar.tsx","./src/specpreview.tsx","./src/api.ts","./src/icons.tsx","./src/main.tsx"],"version":"5.9.3"}

@@ -12,9 +12,71 @@ async function check(res: Response): Promise<Response> {
   return res;
 }
 
-export async function createSession(): Promise<string> {
+export async function login(username: string, password: string): Promise<string> {
+  const res = await check(
+    await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    }),
+  );
+  return (await res.json()).username as string;
+}
+
+export async function logout(): Promise<void> {
+  await fetch("/api/auth/logout", { method: "POST" });
+}
+
+export async function fetchMe(): Promise<string | null> {
+  const res = await fetch("/api/auth/me");
+  if (!res.ok) return null;
+  return (await res.json()).username as string;
+}
+
+export interface SessionMeta {
+  id: string;
+  title: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export async function createSession(): Promise<SessionMeta> {
   const res = await check(await fetch("/api/sessions", { method: "POST" }));
-  return (await res.json()).session_id as string;
+  return (await res.json()) as SessionMeta;
+}
+
+export async function listSessions(): Promise<SessionMeta[]> {
+  const res = await check(await fetch("/api/sessions"));
+  return (await res.json()) as SessionMeta[];
+}
+
+export async function renameSession(id: string, title: string): Promise<void> {
+  await check(
+    await fetch(`/api/sessions/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    }),
+  );
+}
+
+export async function deleteSession(id: string): Promise<void> {
+  await check(await fetch(`/api/sessions/${id}`, { method: "DELETE" }));
+}
+
+export async function fetchSpec(sessionId: string): Promise<string> {
+  const res = await check(await fetch(`/api/sessions/${sessionId}/spec`));
+  return (await res.json()).spec_markdown as string;
+}
+
+export interface HistoryMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export async function fetchMessages(sessionId: string): Promise<HistoryMessage[]> {
+  const res = await check(await fetch(`/api/sessions/${sessionId}/messages`));
+  return (await res.json()).messages as HistoryMessage[];
 }
 
 export interface StreamHandlers {
@@ -74,6 +136,23 @@ export async function streamMessage(
 export async function fetchExamplesStats(): Promise<number> {
   const res = await check(await fetch("/api/examples/stats"));
   return (await res.json()).chunks_total as number;
+}
+
+export async function exportSpecDocx(sessionId: string): Promise<void> {
+  const res = await check(await fetch(`/api/sessions/${sessionId}/spec/export`));
+  const blob = await res.blob();
+  const disposition = res.headers.get("Content-Disposition") ?? "";
+  const utf8Match = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
+  const plainMatch = /filename="([^"]+)"/i.exec(disposition);
+  const filename = utf8Match
+    ? decodeURIComponent(utf8Match[1])
+    : (plainMatch?.[1] ?? "tz.docx");
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 export async function uploadSpec(

@@ -1,13 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   createSession,
+  deleteSession,
   fetchExamplesStats,
+  fetchMe,
+  fetchMessages,
+  fetchSpec,
+  listSessions,
+  logout,
+  renameSession,
   streamMessage,
   uploadSpec,
+  type SessionMeta,
 } from "./api";
 import ChatPanel, { type ChatMessage } from "./ChatPanel";
+import LoginScreen from "./LoginScreen";
+import SessionSidebar from "./SessionSidebar";
 import SpecPreview from "./SpecPreview";
-import { FileTextIcon, MoonIcon, SunIcon } from "./icons";
+import { FileTextIcon, LogOutIcon, MoonIcon, SunIcon } from "./icons";
 
 type Theme = "light" | "dark";
 
@@ -23,7 +33,10 @@ const ACCEPTED = [".docx", ".md", ".markdown", ".txt"];
 
 export default function App() {
   const [theme, setTheme] = useState<Theme>(initialTheme);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [username, setUsername] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [busy, setBusy] = useState(false);
   const [turnStatus, setTurnStatus] = useState<string | null>(null);
@@ -42,22 +55,110 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => {
-    sessionPromise.current = createSession()
-      .then((id) => {
-        setSessionId(id);
-        return id;
-      })
-      .catch((e) => {
-        pushMessage({
-          role: "error",
-          content: `Нет связи с сервером: ${e.message}`,
-        });
-        throw e;
+    fetchMe()
+      .then(setUsername)
+      .finally(() => setAuthChecked(true));
+  }, []);
+
+  useEffect(() => {
+    if (!username) return;
+    sessionPromise.current = (async () => {
+      const list = await listSessions().catch(() => []);
+      setSessions(list);
+      const created = await createSession();
+      setSessions((prev) => [created, ...prev]);
+      setSessionId(created.id);
+      return created.id;
+    })().catch((e) => {
+      pushMessage({
+        role: "error",
+        content: `Нет связи с сервером: ${e.message}`,
       });
+      throw e;
+    });
     fetchExamplesStats()
       .then(setExamplesCount)
       .catch(() => setExamplesCount(null));
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [username]);
+
+  async function handleLogout() {
+    await logout().catch(() => {});
+    setUsername(null);
+    setSessionId(null);
+    sessionPromise.current = null;
+    setSessions([]);
+    setMessages([]);
+    setSpec("");
+    setPrevSpec(null);
+  }
+
+  function refreshSessions() {
+    listSessions()
+      .then(setSessions)
+      .catch(() => {});
+  }
+
+  async function selectSession(id: string) {
+    if (id === sessionId || busy) return;
+    setSessionId(id);
+    sessionPromise.current = Promise.resolve(id);
+    setBusy(true);
+    setMessages([]);
+    setSpec("");
+    setPrevSpec(null);
+    setSpecUpdatedAt(null);
+    try {
+      const [specMarkdown, history] = await Promise.all([
+        fetchSpec(id),
+        fetchMessages(id),
+      ]);
+      setSpec(specMarkdown);
+      setMessages(history.map((m) => ({ ...m, at: new Date() })));
+    } catch (e) {
+      pushMessage({
+        role: "error",
+        content: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleNewChat() {
+    if (busy) return;
+    try {
+      const created = await createSession();
+      setSessions((prev) => [created, ...prev]);
+      await selectSession(created.id);
+    } catch (e) {
+      pushMessage({
+        role: "error",
+        content: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
+  async function handleRenameSession(id: string, title: string) {
+    setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, title } : s)));
+    try {
+      await renameSession(id, title);
+    } catch {
+      refreshSessions();
+    }
+  }
+
+  async function handleDeleteSession(id: string) {
+    const wasActive = id === sessionId;
+    setSessions((prev) => prev.filter((s) => s.id !== id));
+    try {
+      await deleteSession(id);
+    } catch {
+      refreshSessions();
+      return;
+    }
+    if (wasActive) void handleNewChat();
+  }
 
   function pushMessage(msg: Omit<ChatMessage, "at">) {
     setMessages((m) => [...m, { ...msg, at: new Date() }]);
@@ -129,6 +230,7 @@ export default function App() {
       finalizeLast("");
       setTurnStatus(null);
       setBusy(false);
+      refreshSessions();
     }
   }
 
@@ -193,6 +295,12 @@ export default function App() {
     if (file && !busy) handleUpload(file);
   }
 
+  if (!authChecked) return null;
+
+  if (!username) {
+    return <LoginScreen onSuccess={setUsername} />;
+  }
+
   return (
     <div
       className="app"
@@ -228,10 +336,26 @@ export default function App() {
           >
             {theme === "dark" ? <SunIcon /> : <MoonIcon />}
           </button>
+          <button
+            className="icon-btn"
+            title={`Выйти (${username})`}
+            onClick={() => void handleLogout()}
+          >
+            <LogOutIcon />
+          </button>
         </div>
       </header>
 
       <main className="app-main">
+        <SessionSidebar
+          sessions={sessions}
+          activeId={sessionId}
+          disabled={busy}
+          onSelect={(id) => void selectSession(id)}
+          onNew={() => void handleNewChat()}
+          onRename={(id, title) => void handleRenameSession(id, title)}
+          onDelete={(id) => void handleDeleteSession(id)}
+        />
         <ChatPanel
           messages={messages}
           busy={busy}
@@ -240,6 +364,7 @@ export default function App() {
           onUpload={handleUpload}
         />
         <SpecPreview
+          sessionId={sessionId}
           markdown={spec}
           prevMarkdown={prevSpec}
           updatedAt={specUpdatedAt}

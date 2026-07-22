@@ -2,9 +2,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { diffArrays, diffLines } from "diff";
+import { exportSpecDocx } from "./api";
 import { CheckIcon, CopyIcon, DownloadIcon, FileTextIcon } from "./icons";
 
 interface Props {
+  sessionId: string | null;
   markdown: string;
   prevMarkdown: string | null;
   updatedAt: Date | null;
@@ -19,10 +21,16 @@ function splitBlocks(md: string): string[] {
     .filter(Boolean);
 }
 
-export default function SpecPreview({ markdown, prevMarkdown, updatedAt }: Props) {
+export default function SpecPreview({
+  sessionId,
+  markdown,
+  prevMarkdown,
+  updatedAt,
+}: Props) {
   const [copied, setCopied] = useState(false);
   const [flash, setFlash] = useState(false);
   const [mode, setMode] = useState<ViewMode>("doc");
+  const [exporting, setExporting] = useState(false);
   const firstRender = useRef(true);
 
   const hasDiff = prevMarkdown !== null && prevMarkdown !== markdown;
@@ -64,7 +72,7 @@ export default function SpecPreview({ markdown, prevMarkdown, updatedAt }: Props
     [markdown, prevMarkdown, hasDiff],
   );
 
-  function download() {
+  function downloadMarkdown() {
     const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -72,6 +80,18 @@ export default function SpecPreview({ markdown, prevMarkdown, updatedAt }: Props
     a.download = "tz.md";
     a.click();
     URL.revokeObjectURL(url);
+  }
+
+  async function downloadDocx() {
+    if (!sessionId || exporting) return;
+    setExporting(true);
+    try {
+      await exportSpecDocx(sessionId);
+    } catch (e) {
+      console.error("Не удалось выгрузить .docx", e);
+    } finally {
+      setExporting(false);
+    }
   }
 
   async function copy() {
@@ -131,11 +151,20 @@ export default function SpecPreview({ markdown, prevMarkdown, updatedAt }: Props
           </button>
           <button
             className="icon-btn"
-            title="Скачать .md"
+            title="Скачать Markdown (.md)"
             disabled={!markdown}
-            onClick={download}
+            onClick={downloadMarkdown}
           >
             <DownloadIcon />
+          </button>
+          <button
+            className="icon-btn icon-btn-label"
+            title="Скачать Word (.docx)"
+            disabled={!markdown || !sessionId || exporting}
+            onClick={() => void downloadDocx()}
+          >
+            <DownloadIcon />
+            <span>DOCX</span>
           </button>
         </div>
       </div>

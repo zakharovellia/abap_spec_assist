@@ -97,6 +97,57 @@ export function SparklesIcon(p: IconProps) {
   );
 }
 
+export function LockIcon(p: IconProps) {
+  return (
+    <svg {...svgProps(p)}>
+      <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
+      <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+    </svg>
+  );
+}
+
+export function LogOutIcon(p: IconProps) {
+  return (
+    <svg {...svgProps(p)}>
+      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+      <polyline points="16 17 21 12 16 7" />
+      <line x1="21" y1="12" x2="9" y2="12" />
+    </svg>
+  );
+}
+
+export function PlusIcon(p: IconProps) {
+  return (
+    <svg {...svgProps(p)}>
+      <path d="M12 5v14M5 12h14" />
+    </svg>
+  );
+}
+
+export function TrashIcon(p: IconProps) {
+  return (
+    <svg {...svgProps(p)}>
+      <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6h16Z" />
+    </svg>
+  );
+}
+
+export function PencilIcon(p: IconProps) {
+  return (
+    <svg {...svgProps(p)}>
+      <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+    </svg>
+  );
+}
+
+export function MessageSquareIcon(p: IconProps) {
+  return (
+    <svg {...svgProps(p)}>
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z" />
+    </svg>
+  );
+}
+
 export function BotMark(p: IconProps) {
   return (
     <svg {...svgProps(p)}>

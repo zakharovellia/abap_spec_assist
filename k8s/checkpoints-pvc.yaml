@@ -1,0 +1,13 @@
+# Сессии пользователей (чекпоинты LangGraph + метаданные: владелец,
+# заголовок) — SQLite-файл. Переживает перезапуск/пересоздание пода backend.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: checkpoints-data
+  namespace: abap-spec-assist
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi

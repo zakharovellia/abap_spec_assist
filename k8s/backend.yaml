@@ -4,9 +4,9 @@ metadata:
   name: backend
   namespace: abap-spec-assist
 spec:
-  # ВАЖНО: сессии чата хранятся в памяти процесса (MemorySaver), поэтому
-  # replicas > 1 требует общего чекпоинтера (postgres/sqlite) и RWX-тома
-  # для папки примеров.
+  # ВАЖНО: сессии чата — SQLite-файл на RWO-томе (checkpoints-data), поэтому
+  # replicas > 1 требует общего чекпоинтера (postgres) и RWX-тома для папки
+  # примеров.
   replicas: 1
   selector:
     matchLabels:
@@ -29,6 +29,8 @@ spec:
           volumeMounts:
             - name: examples
               mountPath: /data/examples
+            - name: checkpoints
+              mountPath: /data/checkpoints
           readinessProbe:
             httpGet:
               path: /api/health
@@ -51,6 +53,9 @@ spec:
         - name: examples
           persistentVolumeClaim:
             claimName: examples-data
+        - name: checkpoints
+          persistentVolumeClaim:
+            claimName: checkpoints-data
 ---
 apiVersion: v1
 kind: Service
