@@ -5,8 +5,7 @@ metadata:
   namespace: abap-spec-assist
 spec:
   # ВАЖНО: сессии чата — SQLite-файл на RWO-томе (checkpoints-data), поэтому
-  # replicas > 1 требует общего чекпоинтера (postgres) и RWX-тома для папки
-  # примеров.
+  # replicas > 1 требует общего чекпоинтера (postgres).
   replicas: 1
   selector:
     matchLabels:
@@ -27,8 +26,6 @@ spec:
             - secretRef:
                 name: backend-secrets
           volumeMounts:
-            - name: examples
-              mountPath: /data/examples
             - name: checkpoints
               mountPath: /data/checkpoints
           readinessProbe:
@@ -50,9 +47,6 @@ spec:
             limits:
               memory: 1Gi
       volumes:
-        - name: examples
-          persistentVolumeClaim:
-            claimName: examples-data
         - name: checkpoints
           persistentVolumeClaim:
             claimName: checkpoints-data

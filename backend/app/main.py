@@ -1,5 +1,5 @@
 import asyncio
-import contextlib
+import hashlib
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.errors import GraphRecursionError
 from pydantic import BaseModel
 
 from app import auth, spec_doc
@@ -19,8 +20,9 @@ from app.config import settings
 from app.docx_parse import file_to_markdown, markdown_to_docx
 from app.graph.builder import DOC_WRITE_TOOLS, build_graph
 from app.mcp_tools import load_sap_tools
-from app.rag.store import count_examples
-from app.rag.watcher import watch_examples_dir
+from app.rag import section_index_store
+from app.rag.ingest import ingest_example
+from app.rag.store import delete_doc, list_docs
 
 logging.basicConfig(level=logging.INFO)
 
@@ -37,11 +39,7 @@ async def lifespan(_: FastAPI):
         await checkpointer.setup()
         # граф пересобирается с SAP-инструментами MCP до приёма трафика
         graph = build_graph(checkpointer, sap_tools=await load_sap_tools())
-        watcher = asyncio.create_task(watch_examples_dir())
         yield
-        watcher.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await watcher
 
 
 app = FastAPI(title="ABAP Spec Assist", lifespan=lifespan)
@@ -55,13 +53,51 @@ app.add_middleware(
 
 
 def _config(session_id: str) -> dict:
-    return {"configurable": {"thread_id": session_id}}
+    return {
+        "configurable": {"thread_id": session_id},
+        "recursion_limit": settings.graph_recursion_limit,
+    }
+
+
+# Правки, внесённые до срыва, уже в чекпоинте — поэтому «продолжите», а не «повторите»
+_RECURSION_DETAIL = (
+    "Ход остановлен: агент превысил лимит шагов "
+    f"({settings.graph_recursion_limit}). Уже внесённые правки сохранены — "
+    "попросите продолжить следующим сообщением."
+)
+
+
+async def _current_sections(session_id: str) -> list[dict]:
+    snapshot = await graph.aget_state(_config(session_id))
+    return snapshot.values.get("sections", []) if snapshot.values else []
 
 
 async def _current_spec(session_id: str) -> str:
-    snapshot = await graph.aget_state(_config(session_id))
-    sections = snapshot.values.get("sections", []) if snapshot.values else []
-    return spec_doc.render_markdown(sections)
+    return spec_doc.render_markdown(await _current_sections(session_id))
+
+
+async def _prune_checkpoints(session_id: str) -> None:
+    """Оставляет последние checkpoint_keep_last чекпоинтов сессии.
+
+    Каждый чекпоинт — полная копия состояния (для большого ТЗ — мегабайты),
+    LangGraph сам старые не удаляет. Вызывается после завершения хода, когда
+    промежуточные шаги уже не нужны; сбой подрезки не влияет на ответ.
+    """
+    try:
+        saver = graph.checkpointer
+        async with saver.lock:
+            for table in ("checkpoints", "writes"):
+                await saver.conn.execute(
+                    f"DELETE FROM {table} WHERE thread_id = ? AND checkpoint_id NOT IN ("
+                    "SELECT checkpoint_id FROM checkpoints WHERE thread_id = ? "
+                    "ORDER BY checkpoint_id DESC LIMIT ?)",
+                    (session_id, session_id, settings.checkpoint_keep_last),
+                )
+            await saver.conn.commit()
+    except Exception:  # noqa: BLE001 — подрезка вспомогательная, ход уже завершён
+        logging.getLogger(__name__).warning(
+            "Не удалось подрезать чекпоинты сессии %s", session_id, exc_info=True
+        )
 
 
 async def _history(session_id: str) -> list[dict]:
@@ -89,6 +125,8 @@ async def _run_graph(session_id: str, user_text: str) -> dict:
         result = await graph.ainvoke(
             {"messages": [HumanMessage(content=user_text)]}, _config(session_id)
         )
+    except GraphRecursionError as exc:
+        raise HTTPException(status_code=502, detail=_RECURSION_DETAIL) from exc
     except Exception as exc:  # noqa: BLE001 — ошибки шлюза LLM отдаём клиенту как 502
         raise HTTPException(status_code=502, detail=f"Ошибка LLM: {exc}") from exc
     return {
@@ -121,8 +159,16 @@ class ChatOut(BaseModel):
     spec_markdown: str
 
 
+class SpecSection(BaseModel):
+    id: str
+    body: str
+
+
 class SpecOut(BaseModel):
     spec_markdown: str
+    # Разделы отдельно: фронтенд ведёт карту id→текст и применяет дельты из
+    # SSE-стрима, не получая полный документ на каждую правку
+    sections: list[SpecSection]
 
 
 class HistoryMessage(BaseModel):
@@ -134,8 +180,19 @@ class HistoryOut(BaseModel):
     messages: list[HistoryMessage]
 
 
-class ExamplesStatsOut(BaseModel):
-    chunks_total: int
+class ExampleDocOut(BaseModel):
+    name: str
+    # Ключ документа в базе (для удаления). Для загруженных через UI совпадает
+    # с именем файла; у документов, проиндексированных старым фоновым сканом
+    # папки, — это путь файла.
+    source: str
+    chunks: int
+
+
+class ExampleUploadResult(BaseModel):
+    name: str
+    chunks: int = 0
+    error: str | None = None
 
 
 class LoginIn(BaseModel):
@@ -209,12 +266,20 @@ async def delete_session(
 ) -> dict:
     sessions_store.delete(session_id, username)
     await graph.checkpointer.adelete_thread(session_id)
+    section_index_store.clear(session_id)
     return {"status": "ok"}
+
+
+def _spec_out(sections: list[dict]) -> SpecOut:
+    return SpecOut(
+        spec_markdown=spec_doc.render_markdown(sections),
+        sections=[SpecSection(id=s["id"], body=s["body"]) for s in sections],
+    )
 
 
 @app.get("/api/sessions/{session_id}/spec", response_model=SpecOut)
 async def get_spec(session_id: str, _: str = Depends(require_session_owner)) -> SpecOut:
-    return SpecOut(spec_markdown=await _current_spec(session_id))
+    return _spec_out(await _current_sections(session_id))
 
 
 @app.get("/api/sessions/{session_id}/spec/export")
@@ -253,6 +318,7 @@ async def send_message(
     sessions_store.set_title_if_default(session_id, message.content)
     result = await _run_graph(session_id, message.content)
     sessions_store.touch(session_id)
+    await _prune_checkpoints(session_id)
     return ChatOut(**result)
 
 
@@ -263,7 +329,8 @@ async def send_message_stream(
     """SSE-стрим хода ассистента.
 
     События: token (кусок текста ответа), status=updating_spec (агент вызвал
-    инструмент), spec (новая версия документа), done (финал), error.
+    инструмент), spec (дельта документа: порядок разделов + изменившиеся
+    тела — полный текст на каждую правку не гоняется), done (финал), error.
     """
     if not message.content.strip():
         raise HTTPException(status_code=422, detail="Пустое сообщение")
@@ -272,6 +339,7 @@ async def send_message_stream(
 
     async def gen():
         last_status = None
+        prev_bodies = {s["id"]: s["body"] for s in await _current_sections(session_id)}
         try:
             async for mode, chunk in graph.astream(
                 {"messages": [HumanMessage(content=message.content)]},
@@ -291,8 +359,13 @@ async def send_message_stream(
                         last_status = name
                         if name in DOC_WRITE_TOOLS:
                             yield _sse({"type": "status", "value": "updating_spec"})
-                        elif name in ("list_sections", "get_section"):
-                            continue  # чтение раздела — тихо, без статус-чипа
+                        elif name in (
+                            "list_sections",
+                            "get_sections",
+                            "find_in_document",
+                            "find_style_examples",
+                        ):
+                            continue  # чтение/поиск по документу и примерам — тихо
                         else:
                             yield _sse(
                                 {"type": "status", "value": "sap_lookup", "tool": name}
@@ -302,12 +375,26 @@ async def send_message_stream(
                 else:  # updates
                     for node, update in chunk.items():
                         if node == "tools" and update and "sections" in update:
+                            secs = update["sections"]
+                            changed = {
+                                s["id"]: s["body"]
+                                for s in secs
+                                if prev_bodies.get(s["id"]) != s["body"]
+                            }
+                            prev_bodies = {s["id"]: s["body"] for s in secs}
                             yield _sse(
                                 {
                                     "type": "spec",
-                                    "markdown": spec_doc.render_markdown(update["sections"]),
+                                    "order": [s["id"] for s in secs],
+                                    "changed": changed,
                                 }
                             )
+        except GraphRecursionError:
+            logging.getLogger(__name__).warning(
+                "Сессия %s: превышен recursion_limit графа", session_id
+            )
+            yield _sse({"type": "error", "detail": _RECURSION_DETAIL})
+            return
         except Exception as exc:  # noqa: BLE001 — стрим уже начат, отдаём ошибку событием
             logging.getLogger(__name__).exception("Ошибка стрима LLM")
             yield _sse({"type": "error", "detail": f"Ошибка LLM: {exc}"})
@@ -319,11 +406,14 @@ async def send_message_stream(
                 reply = m.content
                 break
         sessions_store.touch(session_id)
+        await _prune_checkpoints(session_id)
+        # Полный текст в done не шлём — фронтенд собрал документ из дельт;
+        # order позволяет ему заметить пропущенную дельту и перезапросить /spec
         yield _sse(
             {
                 "type": "done",
                 "reply": reply,
-                "spec_markdown": spec_doc.render_markdown(state.values.get("sections", [])),
+                "order": [s["id"] for s in state.values.get("sections", [])],
             }
         )
 
@@ -350,17 +440,65 @@ async def upload_spec(
     sections = spec_doc.parse_sections(markdown)
     # Новая загрузка полностью заменяет документ — старый ретривал-кэш неактуален
     await graph.aupdate_state(
-        _config(session_id),
-        {"sections": sections, "section_index": {}, "relevant_section_ids": []},
+        _config(session_id), {"sections": sections, "relevant_section_ids": []}
     )
+    section_index_store.clear(session_id)
     sessions_store.set_title_if_default(session_id, file.filename or "Загруженное ТЗ")
     sessions_store.touch(session_id)
-    return SpecOut(spec_markdown=spec_doc.render_markdown(sections))
+    return _spec_out(sections)
 
 
-@app.get("/api/examples/stats", response_model=ExamplesStatsOut)
-def examples_stats(_: str = Depends(auth.require_user)) -> ExamplesStatsOut:
+# --- база примеров ТЗ (общая для всех пользователей) ---
+# Наполняется через UI; фонового скана папки больше нет (см. app/rag/ingest.py).
+
+
+@app.get("/api/examples", response_model=list[ExampleDocOut])
+async def examples_list(_: str = Depends(auth.require_user)) -> list[ExampleDocOut]:
     try:
-        return ExamplesStatsOut(chunks_total=count_examples())
-    except Exception:  # noqa: BLE001
-        return ExamplesStatsOut(chunks_total=0)
+        docs = await asyncio.to_thread(list_docs)
+    except Exception as exc:  # noqa: BLE001 — Qdrant недоступен
+        raise HTTPException(status_code=502, detail=f"База примеров недоступна: {exc}") from exc
+    return [ExampleDocOut(**d) for d in docs]
+
+
+@app.post("/api/examples/upload", response_model=list[ExampleUploadResult])
+async def examples_upload(
+    files: list[UploadFile], _: str = Depends(auth.require_user)
+) -> list[ExampleUploadResult]:
+    """Индексирует приложенные примеры ТЗ (можно несколько за раз).
+
+    Ключ документа — имя файла: повторная загрузка файла с тем же именем
+    заменяет его чанки в базе. Сбой одного файла не прерывает остальные.
+    """
+    results: list[ExampleUploadResult] = []
+    for f in files:
+        name = f.filename or "файл"
+        data = await f.read()
+        try:
+            markdown = file_to_markdown(name, data)
+            chunks = await asyncio.to_thread(
+                ingest_example,
+                name,
+                markdown,
+                source_path=name,
+                content_hash=hashlib.sha256(data).hexdigest(),
+            )
+            results.append(ExampleUploadResult(name=name, chunks=chunks))
+        except ValueError as exc:  # неподдерживаемый формат
+            results.append(ExampleUploadResult(name=name, error=str(exc)))
+        except Exception as exc:  # noqa: BLE001 — эмбеддинги/Qdrant
+            results.append(
+                ExampleUploadResult(name=name, error=f"Не удалось проиндексировать: {exc}")
+            )
+    return results
+
+
+@app.delete("/api/examples")
+async def examples_delete(source: str, _: str = Depends(auth.require_user)) -> dict:
+    """Удаляет все чанки документа по его ключу (query-параметр source —
+    в ключах старых документов из папки есть слэши, path-параметром неудобно)."""
+    try:
+        await asyncio.to_thread(delete_doc, source)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"База примеров недоступна: {exc}") from exc
+    return {"status": "ok"}

@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   createSession,
   deleteSession,
-  fetchExamplesStats,
   fetchMe,
   fetchMessages,
   fetchSpec,
@@ -12,8 +11,10 @@ import {
   streamMessage,
   uploadSpec,
   type SessionMeta,
+  type SpecSection,
 } from "./api";
 import ChatPanel, { type ChatMessage } from "./ChatPanel";
+import ExamplesPanel from "./ExamplesPanel";
 import LoginScreen from "./LoginScreen";
 import SessionSidebar from "./SessionSidebar";
 import SpecPreview from "./SpecPreview";
@@ -43,11 +44,22 @@ export default function App() {
   const [spec, setSpec] = useState("");
   const [prevSpec, setPrevSpec] = useState<string | null>(null);
   const [specUpdatedAt, setSpecUpdatedAt] = useState<Date | null>(null);
-  const [examplesCount, setExamplesCount] = useState<number | null>(null);
   const [dragging, setDragging] = useState(false);
   const sessionPromise = useRef<Promise<string> | null>(null);
   const dragDepth = useRef(0);
   const specAtTurnStart = useRef("");
+  // Карта id раздела → текст: документ собирается из SSE-дельт (сервер шлёт
+  // только изменившиеся разделы, а не весь текст на каждую правку)
+  const sectionsRef = useRef<Map<string, string>>(new Map());
+
+  /** Полная замена локальной карты разделов; возвращает markdown документа. */
+  function seedSections(sections: SpecSection[]): string {
+    sectionsRef.current = new Map(sections.map((s) => [s.id, s.body]));
+    return sections
+      .map((s) => s.body)
+      .filter(Boolean)
+      .join("\n\n");
+  }
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -76,9 +88,6 @@ export default function App() {
       });
       throw e;
     });
-    fetchExamplesStats()
-      .then(setExamplesCount)
-      .catch(() => setExamplesCount(null));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [username]);
 
@@ -91,6 +100,7 @@ export default function App() {
     setMessages([]);
     setSpec("");
     setPrevSpec(null);
+    sectionsRef.current = new Map();
   }
 
   function refreshSessions() {
@@ -108,12 +118,14 @@ export default function App() {
     setSpec("");
     setPrevSpec(null);
     setSpecUpdatedAt(null);
+    sectionsRef.current = new Map();
     try {
-      const [specMarkdown, history] = await Promise.all([
+      const [specData, history] = await Promise.all([
         fetchSpec(id),
         fetchMessages(id),
       ]);
-      setSpec(specMarkdown);
+      seedSections(specData.sections);
+      setSpec(specData.spec_markdown);
       setMessages(history.map((m) => ({ ...m, at: new Date() })));
     } catch (e) {
       pushMessage({
@@ -192,6 +204,20 @@ export default function App() {
     setTurnStatus(null);
   }
 
+  /** Применить SSE-дельту: order — id всех разделов, changed — новые тела. */
+  function applySpecDelta(order: string[], changed: Record<string, string>) {
+    const prev = sectionsRef.current;
+    const next = new Map<string, string>();
+    const parts: string[] = [];
+    for (const id of order) {
+      const body = changed[id] ?? prev.get(id) ?? "";
+      next.set(id, body);
+      if (body) parts.push(body);
+    }
+    sectionsRef.current = next;
+    applySpec(parts.join("\n\n"));
+  }
+
   async function runTurn(text: string) {
     setBusy(true);
     specAtTurnStart.current = spec;
@@ -209,10 +235,19 @@ export default function App() {
               ? "Обновляю документ…"
               : `Смотрю в SAP: ${tool ?? "объекты"}…`,
           ),
-        onSpec: applySpec,
-        onDone: (reply, specMarkdown) => {
+        onSpec: applySpecDelta,
+        onDone: (reply, order) => {
           finalizeLast(reply);
-          if (specMarkdown !== spec && specMarkdown) setSpec(specMarkdown);
+          // расхождение с сервером (пропущенная дельта) — забрать документ целиком
+          const map = sectionsRef.current;
+          if (order.length !== map.size || order.some((sid) => !map.has(sid))) {
+            void fetchSpec(id)
+              .then((d) => {
+                seedSections(d.sections);
+                setSpec(d.spec_markdown);
+              })
+              .catch(() => {});
+          }
         },
       });
     } catch (e) {
@@ -253,9 +288,10 @@ export default function App() {
         setBusy(true);
         try {
           const id = sessionId ?? (await sessionPromise.current!);
-          const markdown = await uploadSpec(id, file);
+          const data = await uploadSpec(id, file);
           setPrevSpec(null);
-          setSpec(markdown);
+          seedSections(data.sections);
+          setSpec(data.spec_markdown);
           setSpecUpdatedAt(new Date());
           await runTurn(
             `Я приложил существующее ТЗ «${file.name}» — оно уже загружено в документ. ` +
@@ -320,15 +356,7 @@ export default function App() {
           </div>
         </div>
         <div className="header-actions">
-          {examplesCount !== null && (
-            <div
-              className="stats-pill"
-              title="Фрагментов реальных ТЗ в базе стиля (RAG)"
-            >
-              <span className="stats-dot" />
-              База примеров: {examplesCount}
-            </div>
-          )}
+          <ExamplesPanel />
           <button
             className="icon-btn"
             title={theme === "dark" ? "Светлая тема" : "Тёмная тема"}

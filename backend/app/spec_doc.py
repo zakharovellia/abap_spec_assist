@@ -207,12 +207,73 @@ def render_section(section: dict) -> str:
     return section["body"]
 
 
-def render_relevant(sections: list[dict], ids: list[str]) -> str:
+def render_sections(sections: list[dict], ids: list[str], max_chars: int) -> str:
+    """Текст нескольких разделов для одного вызова get_sections.
+
+    Суммарный объём ограничен max_chars: не поместившиеся разделы не
+    возвращаются, а перечисляются в конце — агент дочитает их следующим
+    вызовом. Первый запрошенный раздел отдаётся всегда, даже если сам по
+    себе больше лимита, иначе агент не сможет прочитать его вовсе.
+    """
+    by_id = {s["id"]: s for s in sections}
+    seen: set[str] = set()
+    blocks: list[str] = []
+    used = 0
+    missing: list[str] = []
+    skipped: list[str] = []
+    for sid in ids:
+        if sid in seen:
+            continue
+        seen.add(sid)
+        s = by_id.get(sid)
+        if s is None:
+            missing.append(sid)
+            continue
+        block = f"### [{s['id']}] {s['title']}\n\n{s['body']}"
+        if blocks and used + len(block) > max_chars:
+            skipped.append(sid)
+            continue
+        blocks.append(block)
+        used += len(block)
+    notes = []
+    if missing:
+        notes.append(f"Разделы не найдены: {', '.join(missing)}.")
+    if skipped:
+        notes.append(
+            "Не поместились в один ответ и НЕ показаны: "
+            f"{', '.join(skipped)} — запроси их отдельным вызовом get_sections."
+        )
+    if not blocks and not notes:
+        return "(не передано ни одного id раздела)"
+    return "\n\n---\n\n".join(blocks + notes)
+
+
+def render_relevant(sections: list[dict], ids: list[str], max_chars: int) -> str:
+    """Блок <relevant_sections> системного промпта с потолком по символам:
+    top_k разделов по 20 000 символов иначе могут вытеснить из контекста LLM
+    историю диалога. Не поместившиеся разделы перечисляются по id — агент
+    дочитает их через get_sections, если они действительно нужны."""
     by_id = {s["id"]: s for s in sections}
     picked = [by_id[i] for i in ids if i in by_id]
     if not picked:
-        return "(ни один раздел не выбран автоматически — используй list_sections/get_section)"
-    blocks = [f"### [{s['id']}] {s['title']}\n\n{s['body']}" for s in picked]
+        return "(ни один раздел не выбран автоматически — используй list_sections/get_sections)"
+    blocks: list[str] = []
+    used = 0
+    omitted: list[str] = []
+    for s in picked:
+        block = f"### [{s['id']}] {s['title']}\n\n{s['body']}"
+        if not blocks and len(block) > max_chars:
+            block = block[:max_chars] + "\n…(раздел обрезан — полный текст через get_sections)"
+        elif used + len(block) > max_chars:
+            omitted.append(s["id"])
+            continue
+        blocks.append(block)
+        used += len(block)
+    if omitted:
+        blocks.append(
+            f"(разделы {', '.join(omitted)} релевантны, но не поместились — "
+            "запроси их через get_sections при необходимости)"
+        )
     return "\n\n---\n\n".join(blocks)
 
 
@@ -232,6 +293,96 @@ def update_section(sections: list[dict], section_id: str, new_text: str) -> tupl
         else:
             out.append(s)
     return out, found
+
+
+def patch_section(
+    sections: list[dict], section_id: str, old_string: str, new_string: str
+) -> tuple[list[dict], str | None]:
+    """Точечная замена фрагмента внутри раздела (аналог string-replace правок
+    кодовых агентов): не заставляет LLM перегенерировать раздел на 20 000
+    символов ради исправления одного числа и исключает «дрейф» соседнего
+    текста при переписывании. Возвращает (sections, текст ошибки | None).
+
+    old_string обязан встречаться в разделе ровно один раз — иначе правка
+    неоднозначна и возвращается подсказка, как её уточнить.
+    """
+    s = find_section(sections, section_id)
+    if s is None:
+        return sections, f"Раздел {section_id} не найден."
+    if not old_string:
+        return sections, "old_string пуст — передай точный фрагмент текста раздела."
+    if old_string == new_string:
+        return sections, "old_string и new_string совпадают — правка не нужна."
+    count = s["body"].count(old_string)
+    if count == 0:
+        return sections, (
+            "Фрагмент не найден в разделе. Он должен совпадать с текстом "
+            "буквально (регистр, пробелы, переносы строк) — сверься с текущим "
+            "текстом через get_sections."
+        )
+    if count > 1:
+        return sections, (
+            f"Фрагмент встречается в разделе {count} раза(-з) — расширь old_string "
+            "контекстом, чтобы он стал уникальным."
+        )
+    new_body = s["body"].replace(old_string, new_string, 1).strip()
+    if not new_body:
+        return sections, "Правка удалила бы весь текст раздела — используй delete_section."
+    out: list[dict] = []
+    for sec in sections:
+        if sec["id"] == section_id:
+            heading = _derive_heading(new_body)
+            level, title = heading if heading else (sec["level"], sec["title"])
+            out.append({**sec, "level": level, "title": title, "body": new_body})
+        else:
+            out.append(sec)
+    return out, None
+
+
+_SEARCH_MAX_SECTIONS = 20
+_SEARCH_SNIPPETS_PER_SECTION = 3
+_SEARCH_CONTEXT_CHARS = 60
+
+
+def search_sections(sections: list[dict], query: str) -> str:
+    """Точный (лексический) поиск по телам разделов, без учёта регистра.
+
+    Дополняет эмбеддинг-ретривал там, где тот слаб: конкретные идентификаторы
+    (VBAK, ME21N, Z-имена). Возвращает готовый текст для ToolMessage:
+    id разделов и сниппеты вокруг совпадений.
+    """
+    q = query.strip().lower()
+    if len(q) < 2:
+        return "Поисковый запрос слишком короткий — укажи хотя бы 2 символа."
+    lines: list[str] = []
+    matched = 0
+    for s in sections:
+        hay = s["body"].lower()
+        count = hay.count(q)
+        if not count:
+            continue
+        matched += 1
+        if matched > _SEARCH_MAX_SECTIONS:
+            continue
+        snippets: list[str] = []
+        pos = hay.find(q)
+        while pos != -1 and len(snippets) < _SEARCH_SNIPPETS_PER_SECTION:
+            start = max(0, pos - _SEARCH_CONTEXT_CHARS)
+            end = min(len(hay), pos + len(q) + _SEARCH_CONTEXT_CHARS)
+            snippet = " ".join(s["body"][start:end].split())
+            snippets.append(f"«…{snippet}…»")
+            pos = hay.find(q, pos + len(q))
+        lines.append(
+            f"- [{s['id']}] {s['title']} — совпадений: {count}: " + " | ".join(snippets)
+        )
+    if not matched:
+        return f"«{query.strip()[:200]}» не найдено в документе."
+    if matched > _SEARCH_MAX_SECTIONS:
+        lines.append(
+            f"…и ещё {matched - _SEARCH_MAX_SECTIONS} разделов с совпадениями "
+            "(уточни запрос, чтобы сузить)."
+        )
+    return "\n".join(lines)
 
 
 def insert_section(

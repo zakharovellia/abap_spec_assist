@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { diffArrays, diffLines } from "diff";
@@ -13,6 +13,22 @@ interface Props {
 }
 
 type ViewMode = "doc" | "diff";
+
+/* Мемоизирован, чтобы правка одного раздела не перепарсивала Markdown тысяч
+   неизменившихся блоков большого документа. */
+const Block = memo(function Block({
+  text,
+  added,
+}: {
+  text: string;
+  added: boolean;
+}) {
+  return (
+    <div className={added ? "block-added" : undefined}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+    </div>
+  );
+});
 
 function splitBlocks(md: string): string[] {
   return md
@@ -184,11 +200,7 @@ export default function SpecPreview({
         ) : mode === "doc" ? (
           <article className={`paper ${flash ? "paper-flash" : ""}`}>
             {blocks.map((b, i) => (
-              <div key={i} className={b.added ? "block-added" : undefined}>
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {b.text}
-                </ReactMarkdown>
-              </div>
+              <Block key={i} text={b.text} added={b.added} />
             ))}
           </article>
         ) : (

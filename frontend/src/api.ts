@@ -64,9 +64,19 @@ export async function deleteSession(id: string): Promise<void> {
   await check(await fetch(`/api/sessions/${id}`, { method: "DELETE" }));
 }
 
-export async function fetchSpec(sessionId: string): Promise<string> {
+export interface SpecSection {
+  id: string;
+  body: string;
+}
+
+export interface SpecData {
+  spec_markdown: string;
+  sections: SpecSection[];
+}
+
+export async function fetchSpec(sessionId: string): Promise<SpecData> {
   const res = await check(await fetch(`/api/sessions/${sessionId}/spec`));
-  return (await res.json()).spec_markdown as string;
+  return (await res.json()) as SpecData;
 }
 
 export interface HistoryMessage {
@@ -82,8 +92,12 @@ export async function fetchMessages(sessionId: string): Promise<HistoryMessage[]
 export interface StreamHandlers {
   onToken: (text: string) => void;
   onStatus: (value: string, tool?: string) => void;
-  onSpec: (markdown: string) => void;
-  onDone: (reply: string, specMarkdown: string) => void;
+  /** Дельта документа: порядок разделов + тела только изменившихся.
+      Полный текст на каждую правку сервер не присылает. */
+  onSpec: (order: string[], changed: Record<string, string>) => void;
+  /** order — id всех разделов финального документа: если каких-то тел нет
+      локально, значит дельта потерялась и нужно перезапросить /spec. */
+  onDone: (reply: string, order: string[]) => void;
 }
 
 export async function streamMessage(
@@ -120,10 +134,10 @@ export async function streamMessage(
             handlers.onStatus(event.value, event.tool);
             break;
           case "spec":
-            handlers.onSpec(event.markdown);
+            handlers.onSpec(event.order ?? [], event.changed ?? {});
             break;
           case "done":
-            handlers.onDone(event.reply, event.spec_markdown);
+            handlers.onDone(event.reply, event.order ?? []);
             break;
           case "error":
             throw new Error(event.detail);
@@ -133,9 +147,40 @@ export async function streamMessage(
   }
 }
 
-export async function fetchExamplesStats(): Promise<number> {
-  const res = await check(await fetch("/api/examples/stats"));
-  return (await res.json()).chunks_total as number;
+export interface ExampleDoc {
+  name: string;
+  source: string;
+  chunks: number;
+}
+
+export interface ExampleUploadResult {
+  name: string;
+  chunks: number;
+  error: string | null;
+}
+
+export async function listExamples(): Promise<ExampleDoc[]> {
+  const res = await check(await fetch("/api/examples"));
+  return (await res.json()) as ExampleDoc[];
+}
+
+export async function uploadExamples(
+  files: File[],
+): Promise<ExampleUploadResult[]> {
+  const form = new FormData();
+  for (const f of files) form.append("files", f);
+  const res = await check(
+    await fetch("/api/examples/upload", { method: "POST", body: form }),
+  );
+  return (await res.json()) as ExampleUploadResult[];
+}
+
+export async function deleteExample(source: string): Promise<void> {
+  await check(
+    await fetch(`/api/examples?source=${encodeURIComponent(source)}`, {
+      method: "DELETE",
+    }),
+  );
 }
 
 export async function exportSpecDocx(sessionId: string): Promise<void> {
@@ -158,7 +203,7 @@ export async function exportSpecDocx(sessionId: string): Promise<void> {
 export async function uploadSpec(
   sessionId: string,
   file: File,
-): Promise<string> {
+): Promise<SpecData> {
   const form = new FormData();
   form.append("file", file);
   const res = await check(
@@ -167,5 +212,5 @@ export async function uploadSpec(
       body: form,
     }),
   );
-  return (await res.json()).spec_markdown as string;
+  return (await res.json()) as SpecData;
 }

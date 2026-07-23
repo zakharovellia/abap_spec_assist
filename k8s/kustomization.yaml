@@ -7,7 +7,6 @@ resources:
   - namespace.yaml
   - configmap.yaml
   - secret.yaml
-  - examples-pvc.yaml
   - checkpoints-pvc.yaml
   - qdrant.yaml
   - backend.yaml

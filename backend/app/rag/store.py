@@ -1,5 +1,6 @@
 """Обёртка над Qdrant: коллекция примеров реальных ТЗ."""
 
+import logging
 import uuid
 from functools import lru_cache
 
@@ -27,13 +28,30 @@ def get_client() -> QdrantClient:
     return QdrantClient(url=url, api_key=settings.qdrant_api_key or None)
 
 
+logger = logging.getLogger(__name__)
+
+
 def ensure_collection(dim: int) -> None:
     client = get_client()
-    if not client.collection_exists(settings.qdrant_collection):
-        client.create_collection(
-            collection_name=settings.qdrant_collection,
-            vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
+    if client.collection_exists(settings.qdrant_collection):
+        current = client.get_collection(settings.qdrant_collection).config.params.vectors.size
+        if current == dim:
+            return
+        # Размерность сменилась вместе с моделью эмбеддингов — старые векторы
+        # в любом случае бесполезны, пересоздаём коллекцию. Примеры нужно
+        # перезалить через панель «База примеров».
+        logger.warning(
+            "Размерность эмбеддингов изменилась (%d → %d) — коллекция %s пересоздана, "
+            "перезалейте примеры ТЗ",
+            current,
+            dim,
+            settings.qdrant_collection,
         )
+        client.delete_collection(settings.qdrant_collection)
+    client.create_collection(
+        collection_name=settings.qdrant_collection,
+        vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
+    )
 
 
 def upsert_chunks(vectors: list[list[float]], payloads: list[dict]) -> None:
@@ -57,33 +75,39 @@ def search(query_vector: list[float], top_k: int) -> list[dict]:
     return [{**(hit.payload or {}), "score": hit.score} for hit in hits]
 
 
-def count_examples() -> int:
+def list_docs() -> list[dict]:
+    """Документы базы примеров: имя, ключ (source_path) и число чанков."""
     client = get_client()
     if not client.collection_exists(settings.qdrant_collection):
-        return 0
-    return client.count(collection_name=settings.qdrant_collection).count
+        return []
+    docs: dict[str, dict] = {}
+    offset = None
+    while True:
+        points, offset = client.scroll(
+            collection_name=settings.qdrant_collection,
+            limit=256,
+            offset=offset,
+            with_payload=["source_path", "doc_name"],
+        )
+        for p in points:
+            payload = p.payload or {}
+            source = payload.get("source_path")
+            if not source:
+                continue
+            doc = docs.setdefault(
+                source,
+                {"name": payload.get("doc_name") or source, "source": source, "chunks": 0},
+            )
+            doc["chunks"] += 1
+        if offset is None:
+            break
+    return sorted(docs.values(), key=lambda d: d["name"].lower())
 
 
 def _source_filter(source_path: str) -> Filter:
     return Filter(
         must=[FieldCondition(key="source_path", match=MatchValue(value=source_path))]
     )
-
-
-def get_doc_hash(source_path: str) -> str | None:
-    """Хэш содержимого, с которым файл был проиндексирован (None — файла нет в базе)."""
-    client = get_client()
-    if not client.collection_exists(settings.qdrant_collection):
-        return None
-    points, _ = client.scroll(
-        collection_name=settings.qdrant_collection,
-        scroll_filter=_source_filter(source_path),
-        limit=1,
-        with_payload=["content_hash"],
-    )
-    if not points:
-        return None
-    return (points[0].payload or {}).get("content_hash")
 
 
 def delete_doc(source_path: str) -> None:
@@ -94,24 +118,3 @@ def delete_doc(source_path: str) -> None:
         collection_name=settings.qdrant_collection,
         points_selector=FilterSelector(filter=_source_filter(source_path)),
     )
-
-
-def list_source_paths() -> set[str]:
-    """Все source_path, присутствующие в коллекции."""
-    client = get_client()
-    if not client.collection_exists(settings.qdrant_collection):
-        return set()
-    paths: set[str] = set()
-    offset = None
-    while True:
-        points, offset = client.scroll(
-            collection_name=settings.qdrant_collection,
-            limit=256,
-            offset=offset,
-            with_payload=["source_path"],
-        )
-        for p in points:
-            if path := (p.payload or {}).get("source_path"):
-                paths.add(path)
-        if offset is None:
-            return paths

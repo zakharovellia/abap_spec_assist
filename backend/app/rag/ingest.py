@@ -1,16 +1,30 @@
-"""Чанкинг примеров ТЗ и загрузка в Qdrant."""
+"""Чанкинг примеров ТЗ и загрузка в Qdrant.
+
+Единица индексации — раздел документа (по заголовкам H1/H2): стиль ТЗ
+(структура таблиц полей, нумерация шагов алгоритма, глубина детализации)
+живёт на уровне раздела, обрывки в пару абзацев его не передают. Поэтому
+в промпт попадает раздел целиком (до MAX_CHUNK_CHARS), а эмбеддится только
+заголовок + начало раздела: у retrieval-моделей (FRIDA, e5) предел 512
+токенов (~1200 символов русского), всё сверх этого модель эмбеддингов молча
+отбросила бы — тот же приём, что в rag/doc_retriever.py для рабочего документа.
+"""
 
 import re
 
 from app.rag import embeddings, store
 
-MAX_CHUNK_CHARS = 1800
+# Потолок текста одного примера (показывается в промпте целиком); разделы
+# длиннее режутся на части по абзацам
+MAX_CHUNK_CHARS = 8000
+# Эмбеддится заголовок + это начало текста (лимит FRIDA/e5 — 512 токенов)
+EMBED_PREVIEW_CHARS = 1000
 
 _HEADING_RE = re.compile(r"^(#{1,2})\s+(.*)$", re.MULTILINE)
 
 
 def split_into_chunks(markdown: str) -> list[dict]:
-    """Режет документ по заголовкам H1/H2; длинные разделы — по абзацам."""
+    """Режет документ на разделы по заголовкам H1/H2; слишком длинные разделы —
+    на части по абзацам."""
     sections: list[tuple[str, str]] = []
     matches = list(_HEADING_RE.finditer(markdown))
     if not matches:
@@ -48,6 +62,11 @@ def _split_long(text: str) -> list[str]:
     return parts
 
 
+def _embed_text(chunk: dict) -> str:
+    preview = chunk["text"][:EMBED_PREVIEW_CHARS]
+    return f"{chunk['section']}\n{preview}" if chunk["section"] else preview
+
+
 def ingest_example(
     doc_name: str,
     markdown: str,
@@ -63,7 +82,7 @@ def ingest_example(
     store.delete_doc(source_path)
     if not chunks:
         return 0
-    vectors = embeddings.embed_passages([c["text"] for c in chunks])
+    vectors = embeddings.embed_passages([_embed_text(c) for c in chunks])
     payloads = [
         {
             "doc_name": doc_name,

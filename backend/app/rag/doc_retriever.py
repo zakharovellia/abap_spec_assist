@@ -15,6 +15,7 @@ import hashlib
 import logging
 import math
 
+from app.config import settings
 from app.rag import embeddings
 
 logger = logging.getLogger(__name__)
@@ -27,7 +28,12 @@ def _preview(section: dict) -> str:
 
 
 def _hash(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    # Имя модели — часть хэша: смена модели эмбеддингов инвалидирует кэш,
+    # иначе старые векторы в чужом векторном пространстве (и, возможно, другой
+    # размерности) тихо ломали бы ранжирование разделов
+    return hashlib.sha256(
+        f"{settings.embeddings_model}\n{text}".encode("utf-8")
+    ).hexdigest()
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
