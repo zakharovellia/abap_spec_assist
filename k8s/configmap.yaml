@@ -14,6 +14,7 @@ data:
   RAG_TOP_K: "4"
   CHECKPOINT_DB_PATH: "/data/checkpoints/checkpoints.sqlite3"
   SECTION_INDEX_DB_PATH: "/data/checkpoints/section_index.sqlite3"
+  ORIGINALS_DIR: "/data/checkpoints/originals"
   MCP_SERVER_URL: "http://sap-mcp.internal/mcp"
   MCP_TRANSPORT: "streamable_http"
   AUTH_ENABLED: "true"

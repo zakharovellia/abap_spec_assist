@@ -14,10 +14,10 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.errors import GraphRecursionError
 from pydantic import BaseModel
 
-from app import auth, spec_doc
+from app import auth, originals, spec_doc
 from app import sessions as sessions_store
 from app.config import settings
-from app.docx_parse import file_to_markdown, markdown_to_docx
+from app.docx_parse import docx_blocks, file_to_markdown
 from app.graph.builder import DOC_WRITE_TOOLS, build_graph
 from app.mcp_tools import load_sap_tools
 from app.rag import section_index_store
@@ -70,10 +70,6 @@ _RECURSION_DETAIL = (
 async def _current_sections(session_id: str) -> list[dict]:
     snapshot = await graph.aget_state(_config(session_id))
     return snapshot.values.get("sections", []) if snapshot.values else []
-
-
-async def _current_spec(session_id: str) -> str:
-    return spec_doc.render_markdown(await _current_sections(session_id))
 
 
 async def _prune_checkpoints(session_id: str) -> None:
@@ -267,6 +263,7 @@ async def delete_session(
     sessions_store.delete(session_id, username)
     await graph.checkpointer.adelete_thread(session_id)
     section_index_store.clear(session_id)
+    originals.delete_original(session_id)
     return {"status": "ok"}
 
 
@@ -284,12 +281,13 @@ async def get_spec(session_id: str, _: str = Depends(require_session_owner)) -> 
 
 @app.get("/api/sessions/{session_id}/spec/export")
 async def export_spec(session_id: str, _: str = Depends(require_session_owner)) -> Response:
-    """Отдаёт документ ТЗ в .docx — превью в Markdown, но пользователю нужен
-    файл в исходном формате, чтобы дальше работать с ним в Word."""
-    markdown = await _current_spec(session_id)
-    if not markdown:
+    """Отдаёт документ ТЗ в .docx. Если сессия начиналась с загрузки .docx —
+    патчит оригинал (шаблон, картинки и стили нетронутых разделов сохраняются),
+    иначе собирает документ из Markdown (см. app/originals.py)."""
+    sections = await _current_sections(session_id)
+    if not spec_doc.render_markdown(sections):
         raise HTTPException(status_code=404, detail="Документ пуст")
-    data = markdown_to_docx(markdown)
+    data = await asyncio.to_thread(originals.export_docx, session_id, sections)
     filename = f"{sessions_store.title(session_id) or 'ТЗ'}.docx"
     return Response(
         content=data,
@@ -433,14 +431,28 @@ async def upload_spec(
     Резюме по документу фронтенд запрашивает следом через /messages/stream.
     """
     data = await file.read()
+    name = file.filename or "file"
     try:
-        markdown = file_to_markdown(file.filename or "file", data)
+        if name.lower().endswith(".docx"):
+            # .docx: блоки с индексами → markdown → разделы; оригинал + карта
+            # «раздел → блоки» сохраняются для экспорта патчем (app/originals.py)
+            blocks = docx_blocks(data)
+            markdown = "\n\n".join(md for _, md in blocks).strip()
+            sections = spec_doc.parse_sections(markdown)
+            originals.save_original(session_id, data, sections, blocks)
+        else:
+            markdown = file_to_markdown(name, data)
+            sections = spec_doc.parse_sections(markdown)
+            originals.delete_original(session_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    sections = spec_doc.parse_sections(markdown)
-    # Новая загрузка полностью заменяет документ — старый ретривал-кэш неактуален
+    # Новая загрузка полностью заменяет документ — старый ретривал-кэш неактуален.
+    # as_node обязателен: без него повторная загрузка подряд (без сообщений
+    # между ними) падает с InvalidUpdateError «Ambiguous update»
     await graph.aupdate_state(
-        _config(session_id), {"sections": sections, "relevant_section_ids": []}
+        _config(session_id),
+        {"sections": sections, "relevant_section_ids": []},
+        as_node="tools",
     )
     section_index_store.clear(session_id)
     sessions_store.set_title_if_default(session_id, file.filename or "Загруженное ТЗ")
